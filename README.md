@@ -1,5 +1,13 @@
 # DocuBot
 
+## TF Summary
+
+The core concept students needed to understand was the difference between different LLM outputs based on context window and the importance of tracking evidence based retrievals. Where students are most likely to struggle is when they are implementing the functions which support DocuBot's retrieval pipeline especially when they go back and try to refactor so that the answers are more focused. I think it might also be difficult to design the refusal feature. AI is helpful if students make sure to use it to explain various aspects of the codebase in the beginning. It is less helpful if students ask it to help identify difference between LLM output modes without much context for the queries or much else. One way I would guide a student without giving them the exact answer is to ensure they have read through the docs and have a general understanding of the functionality we want docubot to have before trying to implement the main functionality, that way they are able to make meaningful changes and have specific targets. 
+
+## Overview
+
+
+
 DocuBot is a small documentation assistant that helps answer developer questions about a codebase.  
 It can operate in three different modes:
 
