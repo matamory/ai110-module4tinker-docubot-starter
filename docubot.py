@@ -9,8 +9,16 @@ Core DocuBot class responsible for:
 
 import os
 import glob
+import re
+
 
 class DocuBot:
+    STOPWORDS = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+        "how", "in", "is", "it", "of", "on", "or", "that", "the", "to",
+        "was", "what", "when", "where", "which", "who", "why", "with",
+    }
+
     def __init__(self, docs_folder="docs", llm_client=None):
         """
         docs_folder: directory containing project documentation files
@@ -22,8 +30,11 @@ class DocuBot:
         # Load documents into memory
         self.documents = self.load_documents()  # List of (filename, text)
 
+        # Split docs into smaller retrieval units (filename, section_text)
+        self.sections = self.build_sections(self.documents)
+
         # Build a retrieval index (implemented in Phase 1)
-        self.index = self.build_index(self.documents)
+        self.index = self.build_index(self.sections)
 
     # -----------------------------------------------------------
     # Document Loading
@@ -48,24 +59,85 @@ class DocuBot:
     # Index Construction (Phase 1)
     # -----------------------------------------------------------
 
-    def build_index(self, documents):
+    def _tokenize(self, text):
+        """Lowercase and split text into simple word tokens."""
+        return re.findall(r"\b\w+\b", text.lower())
+
+    def _query_keywords(self, query):
+        """Return informative query tokens after removing common filler words."""
+        return [
+            token
+            for token in self._tokenize(query)
+            if len(token) > 2 and token not in self.STOPWORDS
+        ]
+
+    def has_meaningful_evidence(self, query, snippets):
+        """
+        Guardrail for refusal behavior.
+
+        "Meaningful evidence" means at least one retrieved snippet contains
+        enough informative query keywords.
+        - If query has 1 keyword, require 1 match.
+        - If query has 2+ keywords, require 2 distinct matches.
+        """
+        if not snippets:
+            return False
+
+        keywords = self._query_keywords(query)
+        if not keywords:
+            return False
+
+        required_overlap = 1 if len(keywords) == 1 else 2
+        keyword_set = set(keywords)
+
+        for _, text in snippets:
+            snippet_tokens = set(self._tokenize(text))
+            overlap_count = len(keyword_set.intersection(snippet_tokens))
+            if overlap_count >= required_overlap:
+                return True
+
+        return False
+
+    def build_sections(self, documents):
+        """
+        Split each document into smaller sections using blank lines.
+        Returns a list of tuples: (filename, section_text)
+        """
+        sections = []
+        for filename, text in documents:
+            # Split on one or more blank lines, keep non-empty trimmed sections.
+            parts = re.split(r"\n\s*\n+", text)
+            for part in parts:
+                section = part.strip()
+                if section:
+                    sections.append((filename, section))
+        return sections
+
+    def build_index(self, sections):
         """
         TODO (Phase 1):
-        Build a tiny inverted index mapping lowercase words to the documents
+        Build a tiny inverted index mapping lowercase words to section ids
         they appear in.
 
         Example structure:
         {
-            "token": ["AUTH.md", "API_REFERENCE.md"],
-            "database": ["DATABASE.md"]
+            "token": [0, 4, 12],
+            "database": [3, 9]
         }
 
         Keep this simple: split on whitespace, lowercase tokens,
         ignore punctuation if needed.
         """
         index = {}
-        # TODO: implement simple indexing
-        return index
+
+        for section_id, (_, text) in enumerate(sections):
+            # Use a set so each section id appears once per token.
+            unique_tokens = set(self._tokenize(text))
+            for token in unique_tokens:
+                index.setdefault(token, set()).add(section_id)
+
+        # Convert sets to sorted lists for deterministic retrieval.
+        return {token: sorted(section_ids) for token, section_ids in index.items()}
 
     # -----------------------------------------------------------
     # Scoring and Retrieval (Phase 1)
@@ -81,8 +153,19 @@ class DocuBot:
         - Count how many appear in the text
         - Return the count as the score
         """
-        # TODO: implement scoring
-        return 0
+        query_tokens = self._query_keywords(query)
+        if not query_tokens:
+            return 0
+
+        token_counts = {}
+        for token in self._tokenize(text):
+            token_counts[token] = token_counts.get(token, 0) + 1
+
+        score = 0
+        for token in query_tokens:
+            score += token_counts.get(token, 0)
+
+        return score
 
     def retrieve(self, query, top_k=3):
         """
@@ -91,8 +174,28 @@ class DocuBot:
 
         Return a list of (filename, text) sorted by score descending.
         """
-        results = []
-        # TODO: implement retrieval logic
+        query_tokens = self._query_keywords(query)
+        if not query_tokens:
+            return []
+
+        # Get candidate section ids from the inverted index.
+        candidate_sections = set()
+        for token in query_tokens:
+            for section_id in self.index.get(token, []):
+                candidate_sections.add(section_id)
+
+        if not candidate_sections:
+            return []
+
+        scored = []
+        for section_id in candidate_sections:
+            filename, text = self.sections[section_id]
+            score = self.score_document(query, text)
+            if score > 0:
+                scored.append((score, section_id, filename, text))
+
+        scored.sort(key=lambda item: (-item[0], item[2], item[1]))
+        results = [(filename, text) for _, _, filename, text in scored]
         return results[:top_k]
 
     # -----------------------------------------------------------
@@ -106,7 +209,7 @@ class DocuBot:
         """
         snippets = self.retrieve(query, top_k=top_k)
 
-        if not snippets:
+        if not self.has_meaningful_evidence(query, snippets):
             return "I do not know based on these docs."
 
         formatted = []
@@ -128,7 +231,7 @@ class DocuBot:
 
         snippets = self.retrieve(query, top_k=top_k)
 
-        if not snippets:
+        if not self.has_meaningful_evidence(query, snippets):
             return "I do not know based on these docs."
 
         return self.llm_client.answer_from_snippets(query, snippets)
